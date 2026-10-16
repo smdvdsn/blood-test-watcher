@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Watch Swiftqueue booking pages and send a phone notification (ntfy and/or
-WhatsApp) when an appointment slot is available within the next N hours.
+WhatsApp) when there's a cancellation: a slot that is free now but wasn't at the
+previous check.
+
+Each check compares a page's free slots with the previous check's snapshot (in
+state.json). New slots dated after the last day the previous check could see are
+newly released days, not cancellations, so they're ignored. The first check of a
+page just records the snapshot.
 
 Usage:
     python watcher.py --once              # single check (cron / GitHub Actions)
@@ -18,7 +24,7 @@ Other configuration comes from environment variables (or CLI flags):
     NTFY_SERVER       optional, defaults to https://ntfy.sh
     WHATSAPP_PHONE    your WhatsApp number in international format, e.g. +447700900123
     WHATSAPP_APIKEY   your CallMeBot API key (see README)
-    WINDOW_HOURS  optional, defaults to 48
+    WINDOW_HOURS      optional: only report cancellations starting within this many hours
 
 Page structure this relies on (Swiftqueue timescreen.php, Oct 2026). Every bookable
 slot for the next few weeks is in the server-rendered HTML; booked times are omitted:
@@ -199,7 +205,7 @@ class Notifier:
                 errors.append(f"{name}: {e!r}")
                 print(f"  {name} notification failed: {e!r}", file=sys.stderr)
         # Only fail if nothing got through, so the slots are retried on the next check
-        # instead of being marked as notified.
+        # instead of being dropped.
         if senders and len(errors) == len(senders):
             raise RuntimeError("all notification channels failed: " + "; ".join(errors))
 
@@ -208,14 +214,29 @@ def load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"notified": {}, "alerts": {}}
+        return {}
 
 
 def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    STATE_FILE.write_text(json.dumps(state, separators=(",", ":")))
 
 
-def check(url: str, notifier: Notifier, window_hours: float, debug: bool, n: int = 1) -> int:
+def snapshot(slots: list[datetime], days: list[str]) -> dict:
+    """Compact, JSON-friendly record of a page's free slots: {"YYYY-MM-DD": "HH:MM HH:MM ..."}."""
+    by_day: dict[str, list[str]] = {d: [] for d in days}
+    for s in slots:
+        by_day.setdefault(f"{s:%Y-%m-%d}", []).append(f"{s:%H:%M}")
+    return {"last_day": max(days) if days else "", "slots": {d: " ".join(t) for d, t in by_day.items()}}
+
+
+def find_cancellations(prev: dict, slots: list[datetime], now: datetime) -> list[datetime]:
+    """Slots free now that weren't at the previous check, excluding newly released days."""
+    before = {f"{d} {t}" for d, times in prev["slots"].items() for t in times.split()}
+    return [s for s in slots
+            if s >= now and f"{s:%Y-%m-%d}" <= prev["last_day"] and f"{s:%Y-%m-%d %H:%M}" not in before]
+
+
+def check(url: str, notifier: Notifier, window_hours: float | None, debug: bool, n: int = 1) -> int:
     now = datetime.now(TZ)
     page_url = url
     html = fetch(url)
@@ -228,45 +249,52 @@ def check(url: str, notifier: Notifier, window_hours: float, debug: bool, n: int
         (DEBUG_DIR / f"page{n}.html").write_text(html, encoding="utf-8")
     name, days, slots = parse(html)
     name = name or f"booking page {n}"
-    soon = [s for s in slots if now <= s <= now + timedelta(hours=window_hours)]
-
-    print(f"[{now:%Y-%m-%d %H:%M}] {name}: {len(slots)} slots over {len(days)} days"
-          f"{f' ({days[0]} to {days[-1]})' if days else ''}; within {window_hours:g}h: {len(soon)}")
-    if slots:
-        print(f"  earliest: {slots[0]:%a %d %b %H:%M}")
-    for s in soon:
-        print(f"  * {s:%a %d %b %H:%M}")
 
     state = load_state()
-    cutoff = (now - timedelta(days=3)).isoformat()
-    state["notified"] = {k: v for k, v in state["notified"].items() if v > cutoff}
+    state.pop("notified", None)  # from the old "next 48 hours" mode
+    snapshots = state.setdefault("snapshots", {})
+    alerts = state.setdefault("alerts", {})
+    prev = snapshots.get(url)
+    cancellations = find_cancellations(prev, slots, now) if prev and days else []
+    if window_hours is not None:
+        cancellations = [s for s in cancellations if s <= now + timedelta(hours=window_hours)]
 
-    key = lambda s: f"{url}|{s.isoformat()}"  # noqa: E731
-    new = [s for s in soon if key(s) not in state["notified"]]
-    if new and notifier.channels:
-        shown = new[:10]
+    print(f"[{now:%Y-%m-%d %H:%M}] {name}: {len(slots)} slots over {len(days)} days"
+          f"{f' ({days[0]} to {days[-1]})' if days else ''}; "
+          + (f"cancellations: {len(cancellations)}" if prev else "first check, snapshot saved"))
+    if slots:
+        print(f"  earliest: {slots[0]:%a %d %b %H:%M}")
+    for s in cancellations:
+        print(f"  * {s:%a %d %b %H:%M}")
+
+    if cancellations and notifier.channels:
+        shown = cancellations[:10]
         lines = "\n".join(f"{s:%a %d %b at %H:%M}" for s in shown)
-        if len(new) > len(shown):
-            lines += f"\n…and {len(new) - len(shown)} more"
-        notifier.send(f"Blood test slot{'s' if len(new) > 1 else ''} at {name}",
-                      f"{lines}\n\nTap to book.", click=page_url, priority="urgent")
-        for s in new:
-            state["notified"][key(s)] = now.isoformat()
-        print(f"  notified about {len(new)} new slot(s)")
+        if len(cancellations) > len(shown):
+            lines += f"\n…and {len(cancellations) - len(shown)} more"
+        notifier.send(f"Cancellation{'s' if len(cancellations) > 1 else ''} at {name}",
+                      f"{lines}\n\nEarliest free slot: {slots[0]:%a %d %b at %H:%M}\nTap to book.",
+                      click=page_url, priority="urgent")
+        print(f"  notified about {len(cancellations)} cancellation(s)")
+
+    # Only replace the snapshot with a page we could read, so a blip that returns an
+    # empty page doesn't make every slot look like a cancellation next time.
+    if days:
+        snapshots[url] = snapshot(slots, days)
 
     # No day blocks at all means the page layout changed (or the link expired).
     # Alert at most once a day so a broken watcher doesn't fail silently.
     if not days and notifier.channels:
-        last = state["alerts"].get(url, "")
+        last = alerts.get(url, "")
         if last < (now - timedelta(days=1)).isoformat():
             notifier.send("Blood test watcher needs attention",
                           f"Couldn't find any appointment days on {name}. The link may have "
                           "expired or the page layout changed. Run: python watcher.py --once --debug",
                           click=url, priority="default")
-            state["alerts"][url] = now.isoformat()
+            alerts[url] = now.isoformat()
 
     save_state(state)
-    return len(soon)
+    return len(cancellations)
 
 
 def main() -> None:
@@ -275,7 +303,8 @@ def main() -> None:
     ap.add_argument("--topic", default=os.environ.get("NTFY_TOPIC"), help="ntfy topic")
     ap.add_argument("--whatsapp-phone", default=os.environ.get("WHATSAPP_PHONE"), help="e.g. +447700900123")
     ap.add_argument("--whatsapp-apikey", default=os.environ.get("WHATSAPP_APIKEY"), help="CallMeBot API key")
-    ap.add_argument("--hours", type=float, default=float(os.environ.get("WINDOW_HOURS", 48)))
+    ap.add_argument("--hours", type=float, default=float(os.environ["WINDOW_HOURS"]) if os.environ.get("WINDOW_HOURS") else None,
+                    help="only report cancellations starting within this many hours (default: any)")
     ap.add_argument("--interval", type=int, default=300, help="seconds between checks in loop mode")
     ap.add_argument("--once", action="store_true", help="check once and exit")
     ap.add_argument("--debug", action="store_true", help="save the fetched page to debug/page.html")

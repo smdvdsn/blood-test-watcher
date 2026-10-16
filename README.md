@@ -1,9 +1,9 @@
-# Blood test slot watcher
+# Blood test cancellation watcher
 
-Checks one or more Swiftqueue booking pages (`timescreen.php`) on a schedule. When an
-appointment is available within the next 48 hours (UK time), it sends a push
-notification and/or WhatsApp message to your phone naming the clinic. Tapping the notification opens that
-clinic's booking page.
+Checks one or more Swiftqueue booking pages (`timescreen.php`) on a schedule. When a
+**cancellation** frees up a slot, it sends a push notification and/or WhatsApp
+message to your phone naming the clinic, the freed slot(s) and the earliest free
+slot. Tapping the notification opens that clinic's booking page.
 
 The pages to watch are listed in [`urls.txt`](urls.txt), one per line. Add or remove
 lines to change which clinics are watched.
@@ -17,10 +17,15 @@ second kind, the watcher follows the Blood Test option itself.
    weeks straight into the HTML, so no browser is needed. Each day is a
    `div.timescreen-day[data-date]` and each free slot a `li.timescreen-time[data-time]`.
    Booked times aren't listed.
-2. Sends an alert via [ntfy](https://ntfy.sh) and/or WhatsApp for any slot starting in the
-   next 48 hours, titled with the clinic name from the page. Each slot is notified
-   only once.
-3. Sends a once-a-day "needs attention" alert for any page with no appointment days
+2. Compares the free slots with the previous check (saved in `state.json`). A slot
+   that is free now but wasn't before is a **cancellation**. Two cases are left out:
+   - **Slots that get booked** (disappear). Nothing to report.
+   - **Newly released days.** Each clinic opens up new days at the end of its booking
+     window. New slots dated after the last day the previous check could see are
+     ignored.
+3. Sends an alert via [ntfy](https://ntfy.sh) and/or WhatsApp for each check that
+   finds cancellations. The first check of a page only records its slots.
+4. Sends a once-a-day "needs attention" alert for any page with no appointment days
    at all. That usually means the link expired or the page layout changed.
 
 Only Python 3.9+ is needed; there are no packages to install. On Windows, also run
@@ -87,7 +92,7 @@ python watcher.py                    # keep checking every ~5 minutes
 | Flag / env var | Default | Meaning |
 |---|---|---|
 | `--url` (repeatable) / `BOOKING_URLS` | `urls.txt` | Pages to watch; overrides `urls.txt` |
-| `--hours` / `WINDOW_HOURS` | 48 | How far ahead counts as "soon" |
+| `--hours` / `WINDOW_HOURS` | any | Only report cancellations starting within this many hours |
 | `--interval` | 300 | Seconds between checks in loop mode (plus up to 60s of jitter) |
 | `--debug` | off | Saves fetched pages to `debug/page1.html`, `page2.html`, … |
 | `NTFY_SERVER` | `https://ntfy.sh` | If you self-host ntfy |
@@ -106,3 +111,13 @@ Please keep the check interval reasonable (5–10 minutes). It's an NHS booking 
 ```bash
 pip install pytest && python -m pytest tests/
 ```
+
+## Things to know
+
+- A slot can appear briefly without being a real cancellation, for example if
+  Swiftqueue holds slots while someone is part-way through booking and then
+  releases them. You may occasionally get an alert for a slot that's gone again
+  by the time you look.
+- On GitHub Actions the snapshot is carried between runs in the Actions cache. If
+  the cache is cleared or expires (7 days without a run), the next run just takes a
+  fresh snapshot.

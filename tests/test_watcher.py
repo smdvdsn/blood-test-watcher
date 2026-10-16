@@ -45,27 +45,93 @@ def test_parse_no_days():
     assert watcher.parse("<p>Something else entirely</p>") == ("", [], [])
 
 
-def test_window(monkeypatch, tmp_path):
-    monkeypatch.setattr(watcher, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(watcher, "fetch", lambda url: PAGE)
-    sent = []
-    monkeypatch.setattr(watcher, "notify", lambda *a, **k: sent.append(a))
+def page(days):
+    """Timescreen markup for {"YYYY-MM-DD": ["HH:MM", ...]}."""
+    out = ['<div id="timescreen-header"><h3> Farnham Hospital Blood Tests </h3></div>']
+    for d, times in days.items():
+        out.append(f'<div class="timescreen-day" data-date="{d}"><ul class="time-container">')
+        out += [f'<li data-time="{t}" class="timescreen-time">{t}</li>' for t in times]
+        out.append("</ul></div>")
+    return "\n".join(out)
 
-    class FixedNow(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return dt(2026, 10, 16, 13, 0)
 
-    monkeypatch.setattr(watcher, "datetime", FixedNow)
-    assert watcher.check("u", watcher.Notifier("topic"), 48, debug=False) == 2  # the two 17 Oct slots, not 20 Oct
-    assert len(sent) == 1 and "17 Oct at 09:10" in sent[0][2]
-    assert sent[0][1] == "Blood test slots at Farnham Hospital Blood Tests"
-    # Second run: same slots, no repeat notification.
-    watcher.check("u", watcher.Notifier("topic"), 48, debug=False)
-    assert len(sent) == 1
-    # Same times on a different booking page are still new.
-    watcher.check("u2", watcher.Notifier("topic"), 48, debug=False)
-    assert len(sent) == 2
+class Harness:
+    """Runs check() against a sequence of fake pages, capturing notifications."""
+
+    def __init__(self, monkeypatch, tmp_path, now=(2026, 10, 16, 13, 0)):
+        monkeypatch.setattr(watcher, "STATE_FILE", tmp_path / "state.json")
+        self.html = ""
+        monkeypatch.setattr(watcher, "fetch", lambda url: self.html)
+        self.sent = []
+        monkeypatch.setattr(watcher, "notify", lambda *a, **k: self.sent.append(a))
+
+        class FixedNow(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return dt(*now)
+
+        monkeypatch.setattr(watcher, "datetime", FixedNow)
+
+    def run(self, days, url="u", hours=None):
+        self.html = page(days) if isinstance(days, dict) else days
+        return watcher.check(url, watcher.Notifier("topic"), hours, debug=False)
+
+
+BASE = {"2026-10-20": ["09:00"], "2026-10-21": ["10:00", "10:05"], "2026-10-22": ["11:00"]}
+
+
+def test_first_check_only_records(monkeypatch, tmp_path):
+    h = Harness(monkeypatch, tmp_path)
+    assert h.run(BASE) == 0 and h.sent == []
+
+
+def test_cancellation_detected_once(monkeypatch, tmp_path):
+    h = Harness(monkeypatch, tmp_path)
+    h.run(BASE)
+    # Someone cancels 17 Oct 08:30 (before the old earliest day) and 21 Oct 10:10.
+    later = {"2026-10-17": ["08:30"], **BASE, "2026-10-21": ["10:00", "10:05", "10:10"]}
+    assert h.run(later) == 2
+    assert len(h.sent) == 1
+    topic, title, message = h.sent[0][:3]
+    assert title == "Cancellations at Farnham Hospital Blood Tests"
+    assert "Sat 17 Oct at 08:30\nWed 21 Oct at 10:10" in message
+    assert "Earliest free slot: Sat 17 Oct at 08:30" in message
+    # Unchanged on the next check: no repeat.
+    assert h.run(later) == 0 and len(h.sent) == 1
+
+
+def test_booked_slots_and_new_days_are_not_cancellations(monkeypatch, tmp_path):
+    h = Harness(monkeypatch, tmp_path)
+    h.run(BASE)
+    # 20 Oct 09:00 got booked; a new day (23 Oct) was released at the end of the window.
+    assert h.run({"2026-10-21": ["10:00", "10:05"], "2026-10-22": ["11:00"], "2026-10-23": ["09:00"]}) == 0
+    assert h.sent == []
+    # A booked slot freeing up again is a cancellation.
+    assert h.run(BASE) == 1 and "Tue 20 Oct at 09:00" in h.sent[0][2]
+
+
+def test_empty_page_does_not_reset_snapshot(monkeypatch, tmp_path):
+    h = Harness(monkeypatch, tmp_path)
+    h.run(BASE)
+    h.run("<p>Service temporarily unavailable</p>")
+    assert [title for _, title, *_ in h.sent] == ["Blood test watcher needs attention"]
+    assert h.run(BASE) == 0  # nothing looks new once the page is back
+
+
+def test_pages_tracked_separately(monkeypatch, tmp_path):
+    h = Harness(monkeypatch, tmp_path)
+    h.run(BASE, url="a")
+    h.run({"2026-10-20": []}, url="b")
+    # Only 20 Oct 09:00 is a cancellation for b; 21-22 Oct are beyond b's previous last day.
+    assert h.run(BASE, url="b") == 1
+    assert h.run(BASE, url="a") == 0  # a already had all of these
+
+
+def test_window_hours(monkeypatch, tmp_path):
+    h = Harness(monkeypatch, tmp_path)
+    h.run(BASE)
+    later = {**BASE, "2026-10-17": ["08:30"], "2026-10-22": ["11:00", "15:00"]}
+    assert h.run(later, hours=48) == 1  # 17 Oct counts, 22 Oct is too far ahead
 
 
 def test_load_urls(monkeypatch, tmp_path):
