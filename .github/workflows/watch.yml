@@ -28,7 +28,7 @@ jobs:
 
       - name: Check for slots
         env:
-          BOOKING_URL: ${{ secrets.BOOKING_URL }}
+          BOOKING_URLS: ${{ secrets.BOOKING_URLS }}   # optional; overrides urls.txt
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python watcher.py --once --debug
 
