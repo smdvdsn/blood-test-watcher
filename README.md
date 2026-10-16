@@ -77,11 +77,17 @@ the cron to `*/30 * * * *`.
 
 ## 2b. Or run it on your own computer
 
-```bash
-export NTFY_TOPIC='bloodtest-k3v9q2x7m'          # ntfy, and/or:
-export WHATSAPP_PHONE='+447700900123'
-export WHATSAPP_APIKEY='123456'
+Put your settings in a `.env` file, which the script reads automatically. `.env` is
+in `.gitignore`, so it won't be committed to the public repo:
 
+```bash
+cp .env.example .env      # Windows: copy .env.example .env
+# then edit .env and fill in NTFY_TOPIC and/or WHATSAPP_PHONE + WHATSAPP_APIKEY
+```
+
+Variables already set in your shell take priority over `.env`.
+
+```bash
 python watcher.py --test-notify      # sends a test on every channel you've set
 python watcher.py --once             # one check of every page in urls.txt
 python watcher.py                    # keep checking every ~5 minutes

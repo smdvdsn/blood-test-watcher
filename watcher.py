@@ -19,7 +19,8 @@ Booking pages to watch, first match wins:
     BOOKING_URLS  env var, one URL per line
     urls.txt      one URL per line, # comments allowed
 
-Other configuration comes from environment variables (or CLI flags):
+Other configuration comes from environment variables, a .env file next to this
+script (see .env.example; real environment variables win), or CLI flags:
     NTFY_TOPIC        your ntfy topic name (subscribe to it in the ntfy phone app)
     NTFY_SERVER       optional, defaults to https://ntfy.sh
     WHATSAPP_PHONE    your WhatsApp number in international format, e.g. +447700900123
@@ -61,6 +62,7 @@ from zoneinfo import ZoneInfo
 TZ = ZoneInfo("Europe/London")
 STATE_FILE = Path(os.environ.get("STATE_FILE", "state.json"))
 URLS_FILE = Path(__file__).with_name("urls.txt")
+ENV_FILE = Path(__file__).with_name(".env")
 DEBUG_DIR = Path("debug")
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -297,7 +299,23 @@ def check(url: str, notifier: Notifier, window_hours: float | None, debug: bool,
     return len(cancellations)
 
 
+def load_dotenv(path: Path = ENV_FILE) -> None:
+    """Read KEY=VALUE lines into os.environ without overriding variables already set."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.removeprefix("export ").split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
+
+
 def main() -> None:
+    load_dotenv()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", action="append", help="booking page URL (repeatable; default: urls.txt)")
     ap.add_argument("--topic", default=os.environ.get("NTFY_TOPIC"), help="ntfy topic")

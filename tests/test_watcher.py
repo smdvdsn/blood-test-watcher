@@ -227,3 +227,19 @@ def test_notifier_partial_failure(monkeypatch):
         pass
     else:
         raise AssertionError("expected RuntimeError when every channel fails")
+
+
+def test_load_dotenv(monkeypatch, tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("# comment\nNTFY_TOPIC=bt-abc\nexport WHATSAPP_PHONE='+447700900123'\n"
+                 'WHATSAPP_APIKEY="12 34"\nEMPTY=\nWINDOW_HOURS=6\n')
+    for k in ("NTFY_TOPIC", "WHATSAPP_PHONE", "WHATSAPP_APIKEY", "EMPTY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("WINDOW_HOURS", "48")  # already set: .env must not override it
+    watcher.load_dotenv(f)
+    import os
+    assert os.environ["NTFY_TOPIC"] == "bt-abc"
+    assert os.environ["WHATSAPP_PHONE"] == "+447700900123"
+    assert os.environ["WHATSAPP_APIKEY"] == "12 34"
+    assert os.environ["EMPTY"] == ""
+    assert os.environ["WINDOW_HOURS"] == "48"
