@@ -30,6 +30,8 @@ jobs:
         env:
           BOOKING_URLS: ${{ secrets.BOOKING_URLS }}   # optional; overrides urls.txt
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          WHATSAPP_APIKEY: ${{ secrets.WHATSAPP_APIKEY }}
         run: python watcher.py --once --debug
 
       - uses: actions/cache/save@v4

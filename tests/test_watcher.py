@@ -57,14 +57,14 @@ def test_window(monkeypatch, tmp_path):
             return dt(2026, 10, 16, 13, 0)
 
     monkeypatch.setattr(watcher, "datetime", FixedNow)
-    assert watcher.check("u", "topic", 48, debug=False) == 2  # the two 17 Oct slots, not 20 Oct
+    assert watcher.check("u", watcher.Notifier("topic"), 48, debug=False) == 2  # the two 17 Oct slots, not 20 Oct
     assert len(sent) == 1 and "17 Oct at 09:10" in sent[0][2]
     assert sent[0][1] == "Blood test slots at Farnham Hospital Blood Tests"
     # Second run: same slots, no repeat notification.
-    watcher.check("u", "topic", 48, debug=False)
+    watcher.check("u", watcher.Notifier("topic"), 48, debug=False)
     assert len(sent) == 1
     # Same times on a different booking page are still new.
-    watcher.check("u2", "topic", 48, debug=False)
+    watcher.check("u2", watcher.Notifier("topic"), 48, debug=False)
     assert len(sent) == 2
 
 
@@ -103,5 +103,61 @@ def test_check_follows_pre_timescreen(monkeypatch, tmp_path):
     monkeypatch.setattr(watcher, "STATE_FILE", tmp_path / "state.json")
     fetched = []
     monkeypatch.setattr(watcher, "fetch", lambda u: fetched.append(u) or (PRE_PAGE if "pre_" in u else PAGE))
-    watcher.check("https://x.test/pre_timescreen.php?id=$2y$10$abc.", None, 24 * 365 * 5, debug=False)
+    watcher.check("https://x.test/pre_timescreen.php?id=$2y$10$abc.", watcher.Notifier(), 24 * 365 * 5, debug=False)
     assert fetched == ["https://x.test/pre_timescreen.php?id=$2y$10$abc.", "https://x.test/timescreen.php?id=$2y$10$abc.&rid=52"]
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self.body = body.encode()
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+
+def test_whatsapp_request(monkeypatch):
+    from urllib.parse import parse_qs, urlparse
+    calls = []
+    monkeypatch.setattr(watcher.urllib.request, "urlopen",
+                        lambda req, timeout: calls.append(req.full_url) or FakeResponse("Message queued."))
+    watcher.notify_whatsapp("+447700900123", "123456", "Slot at Farnham", "Fri 17 Oct at 09:10",
+                            click="https://www.swiftqueue.co.uk/timescreen.php?id=$2y$10$a/b.&rid=52")
+    q = parse_qs(urlparse(calls[0]).query)
+    assert q["phone"] == ["+447700900123"] and q["apikey"] == ["123456"]
+    assert q["text"] == ["*Slot at Farnham*\nFri 17 Oct at 09:10\n"
+                         "https://www.swiftqueue.co.uk/timescreen.php?id=%242y%2410%24a/b.&rid=52"]
+
+
+def test_whatsapp_bad_key(monkeypatch):
+    monkeypatch.setattr(watcher.urllib.request, "urlopen", lambda req, timeout: FakeResponse("<p>APIKey is invalid.</p>"))
+    try:
+        watcher.notify_whatsapp("+447700900123", "bad", "t", "m")
+    except RuntimeError as e:
+        assert "APIKey is invalid" in str(e)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_notifier_partial_failure(monkeypatch):
+    sent = []
+    monkeypatch.setattr(watcher, "notify", lambda *a: sent.append("ntfy"))
+    def boom(*a, **k):
+        raise OSError("down")
+    monkeypatch.setattr(watcher, "notify_whatsapp", boom)
+    n = watcher.Notifier("topic", "+447700900123", "key")
+    assert n.channels == ["ntfy", "WhatsApp"]
+    n.send("t", "m")  # WhatsApp down but ntfy worked: no exception
+    assert sent == ["ntfy"]
+    monkeypatch.setattr(watcher, "notify", boom)
+    try:
+        n.send("t", "m")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected RuntimeError when every channel fails")

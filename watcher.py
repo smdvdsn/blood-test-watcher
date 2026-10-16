@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Watch a Swiftqueue booking page and push a phone notification (via ntfy)
-when an appointment slot is available within the next N hours.
+"""Watch Swiftqueue booking pages and send a phone notification (ntfy and/or
+WhatsApp) when an appointment slot is available within the next N hours.
 
 Usage:
     python watcher.py --once              # single check (cron / GitHub Actions)
     python watcher.py                     # loop forever, checking every --interval seconds
     python watcher.py --once --debug      # also save the fetched page to debug/page.html
-    python watcher.py --test-notify       # send a test push to your phone and exit
+    python watcher.py --test-notify       # send a test message on every channel and exit
 
 Booking pages to watch, first match wins:
     --url URL     (repeatable)
@@ -14,8 +14,10 @@ Booking pages to watch, first match wins:
     urls.txt      one URL per line, # comments allowed
 
 Other configuration comes from environment variables (or CLI flags):
-    NTFY_TOPIC    your ntfy topic name (subscribe to it in the ntfy phone app)
-    NTFY_SERVER   optional, defaults to https://ntfy.sh
+    NTFY_TOPIC        your ntfy topic name (subscribe to it in the ntfy phone app)
+    NTFY_SERVER       optional, defaults to https://ntfy.sh
+    WHATSAPP_PHONE    your WhatsApp number in international format, e.g. +447700900123
+    WHATSAPP_APIKEY   your CallMeBot API key (see README)
     WINDOW_HOURS  optional, defaults to 48
 
 Page structure this relies on (Swiftqueue timescreen.php, Oct 2026). Every bookable
@@ -40,13 +42,14 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.request
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote, urlencode, urljoin
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/London")
@@ -155,6 +158,52 @@ def notify(topic: str, title: str, message: str, click: str | None = None, prior
     urllib.request.urlopen(req, timeout=30).read()
 
 
+def notify_whatsapp(phone: str, apikey: str, title: str, message: str, click: str | None = None) -> None:
+    """Send a WhatsApp message to yourself via CallMeBot's free personal-use API."""
+    text = f"*{title}*\n{message}"
+    if click:
+        # WhatsApp stops auto-linking at a literal "$", which Swiftqueue ids are full of.
+        text += "\n" + quote(click, safe=":/?&=.%")
+    url = "https://api.callmebot.com/whatsapp.php?" + urlencode({"phone": phone, "text": text, "apikey": apikey})
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        body = r.read().decode("utf-8", errors="replace")
+    # CallMeBot reports problems (bad key, unknown number) in a 200 response body.
+    if "queued" not in body.lower() and any(w in body.lower() for w in ("error", "invalid")):
+        raise RuntimeError(f"CallMeBot: {' '.join(re.sub(r'<[^>]+>', ' ', body).split())[:200]}")
+
+
+class Notifier:
+    """Sends each message to every configured channel."""
+
+    def __init__(self, ntfy_topic: str | None = None, whatsapp_phone: str | None = None,
+                 whatsapp_apikey: str | None = None) -> None:
+        self.ntfy_topic = ntfy_topic
+        self.whatsapp = (whatsapp_phone, whatsapp_apikey) if whatsapp_phone and whatsapp_apikey else None
+
+    @property
+    def channels(self) -> list[str]:
+        return [name for name, on in (("ntfy", self.ntfy_topic), ("WhatsApp", self.whatsapp)) if on]
+
+    def send(self, title: str, message: str, click: str | None = None, priority: str = "high") -> None:
+        senders = []
+        if self.ntfy_topic:
+            senders.append(("ntfy", lambda: notify(self.ntfy_topic, title, message, click, priority)))
+        if self.whatsapp:
+            senders.append(("WhatsApp", lambda: notify_whatsapp(*self.whatsapp, title, message, click)))
+        errors = []
+        for name, send in senders:
+            try:
+                send()
+            except Exception as e:
+                errors.append(f"{name}: {e!r}")
+                print(f"  {name} notification failed: {e!r}", file=sys.stderr)
+        # Only fail if nothing got through, so the slots are retried on the next check
+        # instead of being marked as notified.
+        if senders and len(errors) == len(senders):
+            raise RuntimeError("all notification channels failed: " + "; ".join(errors))
+
+
 def load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text())
@@ -166,7 +215,7 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def check(url: str, topic: str | None, window_hours: float, debug: bool, n: int = 1) -> int:
+def check(url: str, notifier: Notifier, window_hours: float, debug: bool, n: int = 1) -> int:
     now = datetime.now(TZ)
     page_url = url
     html = fetch(url)
@@ -194,26 +243,26 @@ def check(url: str, topic: str | None, window_hours: float, debug: bool, n: int 
 
     key = lambda s: f"{url}|{s.isoformat()}"  # noqa: E731
     new = [s for s in soon if key(s) not in state["notified"]]
-    if new and topic:
+    if new and notifier.channels:
         shown = new[:10]
         lines = "\n".join(f"{s:%a %d %b at %H:%M}" for s in shown)
         if len(new) > len(shown):
             lines += f"\n…and {len(new) - len(shown)} more"
-        notify(topic, f"Blood test slot{'s' if len(new) > 1 else ''} at {name}",
-               f"{lines}\n\nTap to book.", click=page_url, priority="urgent")
+        notifier.send(f"Blood test slot{'s' if len(new) > 1 else ''} at {name}",
+                      f"{lines}\n\nTap to book.", click=page_url, priority="urgent")
         for s in new:
             state["notified"][key(s)] = now.isoformat()
         print(f"  notified about {len(new)} new slot(s)")
 
     # No day blocks at all means the page layout changed (or the link expired).
     # Alert at most once a day so a broken watcher doesn't fail silently.
-    if not days and topic:
+    if not days and notifier.channels:
         last = state["alerts"].get(url, "")
         if last < (now - timedelta(days=1)).isoformat():
-            notify(topic, "Blood test watcher needs attention",
-                   f"Couldn't find any appointment days on {name}. The link may have "
-                   "expired or the page layout changed. Run: python watcher.py --once --debug",
-                   click=url, priority="default")
+            notifier.send("Blood test watcher needs attention",
+                          f"Couldn't find any appointment days on {name}. The link may have "
+                          "expired or the page layout changed. Run: python watcher.py --once --debug",
+                          click=url, priority="default")
             state["alerts"][url] = now.isoformat()
 
     save_state(state)
@@ -223,7 +272,9 @@ def check(url: str, topic: str | None, window_hours: float, debug: bool, n: int 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", action="append", help="booking page URL (repeatable; default: urls.txt)")
-    ap.add_argument("--topic", default=os.environ.get("NTFY_TOPIC"))
+    ap.add_argument("--topic", default=os.environ.get("NTFY_TOPIC"), help="ntfy topic")
+    ap.add_argument("--whatsapp-phone", default=os.environ.get("WHATSAPP_PHONE"), help="e.g. +447700900123")
+    ap.add_argument("--whatsapp-apikey", default=os.environ.get("WHATSAPP_APIKEY"), help="CallMeBot API key")
     ap.add_argument("--hours", type=float, default=float(os.environ.get("WINDOW_HOURS", 48)))
     ap.add_argument("--interval", type=int, default=300, help="seconds between checks in loop mode")
     ap.add_argument("--once", action="store_true", help="check once and exit")
@@ -231,23 +282,27 @@ def main() -> None:
     ap.add_argument("--test-notify", action="store_true", help="send a test notification and exit")
     args = ap.parse_args()
 
+    notifier = Notifier(args.topic, args.whatsapp_phone, args.whatsapp_apikey)
+    if args.whatsapp_phone and not args.whatsapp_apikey or args.whatsapp_apikey and not args.whatsapp_phone:
+        print("WARNING: WhatsApp needs both WHATSAPP_PHONE and WHATSAPP_APIKEY; skipping it.", file=sys.stderr)
+
     if args.test_notify:
-        if not args.topic:
-            sys.exit("Set NTFY_TOPIC or pass --topic")
-        notify(args.topic, "Blood test watcher", "Test notification: it works!")
-        print("Sent.")
+        if not notifier.channels:
+            sys.exit("No notification channels: set NTFY_TOPIC and/or WHATSAPP_PHONE + WHATSAPP_APIKEY")
+        notifier.send("Blood test watcher", "Test notification: it works!")
+        print(f"Sent via {', '.join(notifier.channels)}.")
         return
     urls = load_urls(args.url)
     if not urls:
         sys.exit("No booking URLs: add them to urls.txt, set BOOKING_URLS, or pass --url")
-    if not args.topic:
-        print("WARNING: no NTFY_TOPIC set; will only print results.", file=sys.stderr)
+    if not notifier.channels:
+        print("WARNING: no notification channels set; will only print results.", file=sys.stderr)
 
     while True:
         failed = 0
         for n, url in enumerate(urls, 1):
             try:
-                check(url, args.topic, args.hours, args.debug, n)
+                check(url, notifier, args.hours, args.debug, n)
             except Exception as e:  # one bad page or network blip shouldn't stop the others
                 failed += 1
                 print(f"check failed for {url}: {e!r}", file=sys.stderr)
