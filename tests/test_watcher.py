@@ -77,3 +77,31 @@ def test_load_urls(monkeypatch, tmp_path):
     monkeypatch.setenv("BOOKING_URLS", "https://c\nhttps://d")
     assert watcher.load_urls(None) == ["https://c", "https://d"]
     assert watcher.load_urls(["https://e"]) == ["https://e"]
+
+
+# Trimmed copy of a real pre_timescreen.php "appointment reason" page.
+PRE_PAGE = """
+<div id="timescreen-header" class="row"><div class="col-md-12"><div class="col-md-10">
+  <h2><span class="fa fa-hospital-o"></span> Frimley Blood Tests (Patient bookable) CLINIC A </h2>
+  <h3 class="facility-subheading"><span class="fa fa-map-marker"></span> Frimley Hospital</h3>
+</div></div></div>
+<h3>Please Select Your Appointment Reason</h3>
+<a class="btn btn-lg rounded sq-green btn-block" href="timescreen.php?id=$2y$10$abc.&rid=52">
+  <h4><span class="fa fa-clock-o"></span> Blood Test <span class="fa fa-chevron-right pull-right"></h4>
+</a>
+<script>var t = "timescreen.php?id=10850&rid=1144";</script>
+"""
+
+
+def test_pre_timescreen_name_and_link():
+    assert watcher.parse(PRE_PAGE)[0] == "Frimley Blood Tests (Patient bookable) CLINIC A"
+    url = "https://www.swiftqueue.co.uk/pre_timescreen.php?id=$2y$10$abc."
+    assert watcher.blood_test_link(PRE_PAGE, url) == "https://www.swiftqueue.co.uk/timescreen.php?id=$2y$10$abc.&rid=52"
+
+
+def test_check_follows_pre_timescreen(monkeypatch, tmp_path):
+    monkeypatch.setattr(watcher, "STATE_FILE", tmp_path / "state.json")
+    fetched = []
+    monkeypatch.setattr(watcher, "fetch", lambda u: fetched.append(u) or (PRE_PAGE if "pre_" in u else PAGE))
+    watcher.check("https://x.test/pre_timescreen.php?id=$2y$10$abc.", None, 24 * 365 * 5, debug=False)
+    assert fetched == ["https://x.test/pre_timescreen.php?id=$2y$10$abc.", "https://x.test/timescreen.php?id=$2y$10$abc.&rid=52"]

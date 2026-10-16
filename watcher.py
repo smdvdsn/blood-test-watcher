@@ -22,13 +22,16 @@ Page structure this relies on (Swiftqueue timescreen.php, Oct 2026). Every booka
 slot for the next few weeks is in the server-rendered HTML; booked times are omitted:
 
     <div id="timescreen-header" ...>
-      <h3><span class="fa fa-hospital-o"></span> Farnham Hospital Blood Tests </h3>
+      <h3><span class="fa fa-hospital-o"></span> Farnham Hospital Blood Tests </h3>   (h2 on some pages)
     ...
     <div class="timescreen-day" data-date="2026-11-19">
       <h3 class="date-title">Thu, 19 Nov</h3>
       ...
       <ul id="morning-times-1" class="time-container" style="display:none;">
         <li data-time="11:15" class="timescreen-time">11:15</li>
+
+A pre_timescreen.php link is an "appointment reason" page instead; the watcher follows
+its Blood Test button, e.g. <a href="timescreen.php?id=...&rid=52"><h4>Blood Test</h4></a>.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/London")
@@ -56,7 +60,7 @@ USER_AGENT = (
 
 
 class TimescreenParser(HTMLParser):
-    """Collects the facility name and (date, time) pairs from the timescreen markup."""
+    """Collects the facility name, (date, time) pairs and any links on to timescreen.php."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -66,13 +70,15 @@ class TimescreenParser(HTMLParser):
         self._date: str | None = None
         self._in_header = False
         self._name_parts: list[str] | None = None
+        self.links: list[tuple[str, str]] = []  # (href, text) of links to timescreen.php
+        self._link: tuple[str, list[str]] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         a = dict(attrs)
         classes = (a.get("class") or "").split()
         if a.get("id") == "timescreen-header":
             self._in_header = True
-        elif tag == "h3" and self._in_header and not self.name:
+        elif tag in ("h2", "h3") and self._in_header and not self.name:
             self._name_parts = []
         elif "timescreen-day" in classes and a.get("data-date"):
             self._date = a["data-date"]
@@ -83,22 +89,43 @@ class TimescreenParser(HTMLParser):
             except ValueError:
                 return
             self.slots.append(dt.replace(tzinfo=TZ))
+        elif tag == "a" and (a.get("href") or "").startswith("timescreen.php?"):
+            self._link = (a["href"], [])
 
     def handle_data(self, data: str) -> None:
         if self._name_parts is not None:
             self._name_parts.append(data)
+        if self._link:
+            self._link[1].append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag == "h3" and self._name_parts is not None:
+        if tag in ("h2", "h3") and self._name_parts is not None:
             self.name = " ".join("".join(self._name_parts).split())
             self._name_parts = None
             self._in_header = False
+        elif tag == "a" and self._link:
+            self.links.append((self._link[0], " ".join("".join(self._link[1]).split())))
+            self._link = None
+
+
+def parse_page(html: str) -> TimescreenParser:
+    p = TimescreenParser()
+    p.feed(html)
+    return p
 
 
 def parse(html: str) -> tuple[str, list[str], list[datetime]]:
-    p = TimescreenParser()
-    p.feed(html)
+    p = parse_page(html)
     return p.name, p.days, sorted(set(p.slots))
+
+
+def blood_test_link(html: str, base_url: str) -> str | None:
+    """On a pre_timescreen.php reason page, the URL of the Blood Test option."""
+    links = parse_page(html).links
+    for href, text in links:
+        if "blood" in text.lower():
+            return urljoin(base_url, href)
+    return urljoin(base_url, links[0][0]) if len(links) == 1 else None
 
 
 def load_urls(cli_urls: list[str] | None) -> list[str]:
@@ -141,7 +168,12 @@ def save_state(state: dict) -> None:
 
 def check(url: str, topic: str | None, window_hours: float, debug: bool, n: int = 1) -> int:
     now = datetime.now(TZ)
+    page_url = url
     html = fetch(url)
+    if "/pre_timescreen.php" in url:
+        page_url = blood_test_link(html, url) or url
+        if page_url != url:
+            html = fetch(page_url)
     if debug:
         DEBUG_DIR.mkdir(exist_ok=True)
         (DEBUG_DIR / f"page{n}.html").write_text(html, encoding="utf-8")
@@ -168,7 +200,7 @@ def check(url: str, topic: str | None, window_hours: float, debug: bool, n: int 
         if len(new) > len(shown):
             lines += f"\n…and {len(new) - len(shown)} more"
         notify(topic, f"Blood test slot{'s' if len(new) > 1 else ''} at {name}",
-               f"{lines}\n\nTap to book.", click=url, priority="urgent")
+               f"{lines}\n\nTap to book.", click=page_url, priority="urgent")
         for s in new:
             state["notified"][key(s)] = now.isoformat()
         print(f"  notified about {len(new)} new slot(s)")

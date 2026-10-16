@@ -3,3 +3,5 @@
 https://www.swiftqueue.co.uk/timescreen.php?id=$2y$10$3DJX0nR5Na5PvX/jSuJGG.P.jPx5x0x1H8Pw1DMPZ6VhPFvosF2n.&rid=52
 # Aldershot Centre for Health Bloods
 https://www.swiftqueue.co.uk/timescreen.php?id=$2y$10$3DJX0nR5Na5PvX/jAQzGG.P.jPx5x0x1H8Pw1DME2ZVhPFvosF2n.&rid=52
+# Frimley Blood Tests (Patient bookable) CLINIC A  (reason page; the watcher follows its Blood Test link)
+https://www.swiftqueue.co.uk/pre_timescreen.php?id=$2y$10$3DJX0nR5Na5PvX/jSuJGG.P.jPx5x0x1H8Pw111E2ZVhPFvosF2n.

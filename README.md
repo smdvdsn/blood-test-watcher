@@ -7,6 +7,9 @@ clinic's booking page.
 
 The pages to watch are listed in [`urls.txt`](urls.txt), one per line. Add or remove
 lines to change which clinics are watched.
+Both kinds of Swiftqueue link work: a `timescreen.php` link (the "choose your time"
+page) or a `pre_timescreen.php` link (the "choose appointment reason" page). For the
+second kind, the watcher follows the Blood Test option itself.
 
 ## How it works
 
