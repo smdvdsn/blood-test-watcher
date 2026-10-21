@@ -2,7 +2,7 @@ name: Watch for blood test slots
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 10 min (GitHub may delay scheduled runs at busy times)
+    - cron: "*/15 * * * *"   # every 15 min (GitHub may delay scheduled runs at busy times)
   workflow_dispatch:          # lets you run it by hand from the Actions tab
 
 concurrency:

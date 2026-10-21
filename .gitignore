@@ -4,3 +4,5 @@ debug/
 state.json
 .env
 .pytest_cache/
+watcher.log
+run-watcher.bat

@@ -60,7 +60,123 @@ Caveats: CallMeBot is a small third-party service with no delivery guarantee, an
 it may be slow or down at times. Your API key only sends messages to your own number.
 Using ntfy as well gives you a backup.
 
-## 2a. Run it in the cloud with GitHub Actions (recommended, nothing to leave running)
+## 2. Run it on your own computer (recommended)
+
+Any computer that's switched on most of the time will do: a laptop, desktop PC, Mac
+or Raspberry Pi. Requests come from your home internet connection, so this keeps
+working when Swiftqueue blocks cloud servers (see the note under step 3).
+
+### Get the code and your settings
+
+1. Install Python 3.9 or newer from [python.org](https://www.python.org/downloads/)
+   if you don't have it (on Windows, tick **Add python.exe to PATH**). Then
+   download this repo: **Code → Download ZIP** on GitHub and unzip it, or
+   `git clone` it. On a Mac, don't put it in Desktop, Documents or Downloads (see
+   "Run it automatically" below for why).
+2. Open a terminal in that folder (Windows: **Command Prompt**; Mac: **Terminal**)
+   and create your settings file:
+
+   ```bash
+   cp .env.example .env      # Windows: copy .env.example .env
+   ```
+
+   Open `.env` in a text editor and fill in `NTFY_TOPIC` and/or `WHATSAPP_PHONE` +
+   `WHATSAPP_APIKEY`. `.env` is in `.gitignore`, so it's never committed.
+   Variables already set in your shell take priority over `.env`.
+3. On Windows, also run `pip install tzdata` (UK time zone data).
+
+In the commands below, use `python3` instead of `python` on a Mac or Linux, and
+`py` instead of `python` on Windows if `python` isn't found.
+
+### Check that it works
+
+```bash
+python watcher.py --test-notify      # sends a test message on every channel you've set
+python watcher.py --once             # checks every page in urls.txt once
+```
+
+The first check only records the current slots, so a normal result looks like
+this, with no alert:
+
+```
+[2026-10-21 10:20] Farnham Hospital Blood Tests: 1234 slots over 25 days (2026-10-21 to 2026-12-23); first check, snapshot saved
+```
+
+### Keep it running
+
+**Easiest: leave a window open.** This checks every ~5 minutes until you close the
+window or the computer sleeps:
+
+```bash
+python watcher.py
+```
+
+**Better: run it automatically.** Schedule a single check (`--once`) every 10
+minutes. It then carries on after restarts without a window open. The scheduled
+command must start in the project folder, because `state.json` (the record of the
+last check) is saved in the current folder.
+
+<details>
+<summary><b>Windows: Task Scheduler</b></summary>
+
+1. In the project folder, create a file called `run-watcher.bat` containing
+   (with your own folder path):
+
+   ```bat
+   cd /d "C:\Users\you\blood-test-watcher"
+   python watcher.py --once >> watcher.log 2>&1
+   ```
+
+   Double-click it once, then check that `watcher.log` shows a successful check.
+2. Open Command Prompt and run (with the full path to the `.bat` file):
+
+   ```bat
+   schtasks /Create /TN "Blood test watcher" /SC MINUTE /MO 10 /TR "C:\Users\you\blood-test-watcher\run-watcher.bat"
+   ```
+
+   A command window flashes up briefly every 10 minutes while you're logged in.
+   To stop it, run `schtasks /Delete /TN "Blood test watcher"`, or delete it in
+   **Task Scheduler**.
+
+</details>
+
+<details>
+<summary><b>Mac, Linux or Raspberry Pi: cron</b></summary>
+
+1. Find the full path to Python with `which python3`, and to the project folder
+   with `pwd` (run inside it).
+2. Run `crontab -e` and add this line, using your paths:
+
+   ```
+   */10 * * * * cd /Users/you/blood-test-watcher && /usr/bin/python3 watcher.py --once >> watcher.log 2>&1
+   ```
+
+3. After 10 minutes, check that `watcher.log` in the project folder shows a
+   successful check. To stop, run `crontab -e` again and delete the line.
+
+On a Mac, cron isn't allowed to read the Desktop, Documents or Downloads folders,
+so keep the project somewhere else, e.g. directly in your home folder. If macOS
+asks whether cron may access files, allow it.
+
+</details>
+
+Things to know when running it locally:
+
+- **Sleep pauses it.** No checks run while the computer is asleep or switched
+  off. On a laptop or desktop, set it to stay awake while plugged in (Windows:
+  **Settings → System → Power**; Mac: **System Settings → Battery/Energy → Prevent
+  automatic sleeping**). A Raspberry Pi never sleeps.
+- `watcher.log` grows by a few lines per check. Delete it now and then if it gets
+  big. It's in `.gitignore`.
+- If a check fails, the log shows `check failed for ...` with the error. A run of
+  `HTTP 403` errors means Swiftqueue is blocking your connection too.
+
+## 3. Or run it in the cloud with GitHub Actions
+
+> **Note (October 2026):** since 20 October 2026, Swiftqueue has answered every
+> request from GitHub Actions servers with `HTTP 403 Forbidden`, so every run
+> fails. The same requests from a home connection work. Use step 2 unless this
+> changes. The workflow is kept here in case the block is lifted.
 
 1. Push this folder to a new GitHub repo.
 2. In the repo, go to **Settings → Secrets and variables → Actions** and add:
@@ -70,28 +186,13 @@ Using ntfy as well gives you a backup.
      rather not have the links visible in a public repo.
 3. Go to **Actions → Watch for blood test slots → Run workflow** and check that the log looks sane.
 
-It then runs every ~10 minutes. **Make the repo public** if you can (your topic and
+It then runs every ~15 minutes. **Make the repo public** if you can (your topic and
 WhatsApp details stay hidden in secrets). Public repos get unlimited Actions minutes. Each run is
 billed as at least 1 minute, so on a private repo (2,000 free minutes a month) change
 the cron to `*/30 * * * *`.
 
-## 2b. Or run it on your own computer
-
-Put your settings in a `.env` file, which the script reads automatically. `.env` is
-in `.gitignore`, so it won't be committed to the public repo:
-
-```bash
-cp .env.example .env      # Windows: copy .env.example .env
-# then edit .env and fill in NTFY_TOPIC and/or WHATSAPP_PHONE + WHATSAPP_APIKEY
-```
-
-Variables already set in your shell take priority over `.env`.
-
-```bash
-python watcher.py --test-notify      # sends a test on every channel you've set
-python watcher.py --once             # one check of every page in urls.txt
-python watcher.py                    # keep checking every ~5 minutes
-```
+To stop the scheduled runs, go to **Actions → Watch for blood test slots → ⋯ →
+Disable workflow**.
 
 ## Options
 
